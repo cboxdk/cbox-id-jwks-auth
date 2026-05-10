@@ -7,6 +7,7 @@ namespace Cbox\CboxIdJwksAuth\Tests;
 use Cbox\CboxIdJwksAuth\Exceptions\InsufficientScopeException;
 use Cbox\CboxIdJwksAuth\RequireOauthJwksValidation;
 use Cbox\CboxIdJwksAuth\ValidatedClaims;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 
@@ -95,6 +96,53 @@ test('throws InsufficientScopeException when the required scope is absent', func
         fn () => response('ok'),
         'id.usage.write', // required-scope param
     ))->toThrow(InsufficientScopeException::class);
+});
+
+test('returns missing_token (not malformed) when the Authorization header is "Bearer " with no token', function (): void {
+    $request = Request::create('/x', 'GET', server: [
+        'HTTP_AUTHORIZATION' => 'Bearer ',
+    ]);
+
+    $response = middleware()->handle($request, fn () => response('ok'));
+
+    expect($response->getStatusCode())->toBe(401);
+    $body = json_decode((string) $response->getContent(), true);
+    expect($body['reason'])->toBe('missing_token');
+});
+
+test('returns missing_token when Authorization is "Bearer    " with whitespace-only payload', function (): void {
+    $request = Request::create('/x', 'GET', server: [
+        'HTTP_AUTHORIZATION' => 'Bearer    ',
+    ]);
+
+    $response = middleware()->handle($request, fn () => response('ok'));
+
+    expect($response->getStatusCode())->toBe(401);
+    $body = json_decode((string) $response->getContent(), true);
+    expect($body['reason'])->toBe('missing_token');
+});
+
+test('WWW-Authenticate header is sanitised against quote / CR / LF injection', function (): void {
+    // Use the validator's malformed-token path: the validator's
+    // exception message is a controlled string, but we still want
+    // to confirm the sanitiser strips dangerous bytes if any leak
+    // through. Pre-format a response and verify the header content.
+    $mw = new RequireOauthJwksValidation(makeValidator());
+
+    $reflection = new \ReflectionMethod($mw, 'unauthorized');
+    $reflection->setAccessible(true);
+
+    /** @var JsonResponse $response */
+    $response = $reflection->invoke(
+        $mw,
+        'malformed',
+        "evil\r\nSet-Cookie: pwned=1\r\nX: \"injected\"",
+    );
+
+    $header = (string) $response->headers->get('WWW-Authenticate');
+    expect($header)->not->toContain("\r")
+        ->and($header)->not->toContain("\n")
+        ->and(substr_count($header, '"'))->toBe(4); // exactly the 4 wrapper quotes — no injected quotes
 });
 
 test('passes through when the required scope IS present', function (): void {

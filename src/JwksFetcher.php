@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Cbox\CboxIdJwksAuth;
 
+use Carbon\CarbonImmutable;
 use Cbox\CboxIdJwksAuth\Exceptions\InvalidTokenException;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Http\Client\Factory as HttpFactory;
@@ -129,13 +130,23 @@ final class JwksFetcher
                 $stale = $this->cache->get($cacheKey.':stale');
                 if (is_array($stale) && isset($stale['keys']) && is_array($stale['keys'])) {
                     $fetchedAt = (string) ($stale['fetched_at'] ?? '');
-                    if ($fetchedAt !== '' && now()->diffInSeconds($fetchedAt) <= $this->graceSeconds) {
-                        /** @var array<string, string> $keys */
-                        $keys = $stale['keys'];
-                        $this->kidToPem = $keys;
-                        $this->lastFetchAt = $fetchedAt;
+                    // Carbon 3's diffInSeconds is signed — for a past
+                    // fetchedAt it returns a NEGATIVE number, so the
+                    // original `<= $graceSeconds` was effectively
+                    // always-true and the grace window was never
+                    // enforced. Use Unix-timestamp arithmetic instead;
+                    // unambiguous, monotonic, and language-portable.
+                    if ($fetchedAt !== '') {
+                        $age = CarbonImmutable::now()->getTimestamp()
+                            - CarbonImmutable::parse($fetchedAt)->getTimestamp();
+                        if ($age >= 0 && $age <= $this->graceSeconds) {
+                            /** @var array<string, string> $keys */
+                            $keys = $stale['keys'];
+                            $this->kidToPem = $keys;
+                            $this->lastFetchAt = $fetchedAt;
 
-                        return $keys;
+                            return $keys;
+                        }
                     }
                 }
             }
@@ -159,6 +170,9 @@ final class JwksFetcher
         }
     }
 
+    /** Minimum acceptable RSA modulus length in BYTES (2048 bits). */
+    private const MIN_RSA_MODULUS_BYTES = 256;
+
     /**
      * @param  array<int, array<string, mixed>>  $keys
      * @return array<string, string> kid → PEM
@@ -178,11 +192,23 @@ final class JwksFetcher
                 continue;
             }
 
+            // SECURITY: reject RSA keys below 2048 bits. NIST SP
+            // 800-131A retired 1024-bit keys in 2014; signatures
+            // produced under such a key are infeasible-but-not-
+            // impossible to forge. Refusing them at parse time
+            // means an upstream JWKS misconfig (a long-lived
+            // legacy key still in the rotation) can't downgrade
+            // our trust boundary.
+            $modulus = self::base64UrlDecode($n);
+            if (strlen($modulus) < self::MIN_RSA_MODULUS_BYTES) {
+                continue;
+            }
+
             $out[$kid] = $this->rsaJwkToPem($n, $e);
         }
 
         if ($out === []) {
-            throw new \RuntimeException('JWKS response contained no usable RSA keys.');
+            throw new \RuntimeException('JWKS response contained no usable RSA keys (none >= 2048 bits).');
         }
 
         return $out;

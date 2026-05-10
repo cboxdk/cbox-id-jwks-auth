@@ -274,6 +274,114 @@ test('falls back to stale cached JWKS when id is unreachable but the cache is wa
         ->not->toThrow(InvalidTokenException::class);
 });
 
+test('grace window REJECTS stale cached JWKS once expired (Carbon 3 sign-bug regression test)', function (): void {
+    // Plant a stale entry directly with a fetched_at far in the past.
+    // Without the Carbon 3 timestamp-arithmetic fix, signed
+    // diffInSeconds returned a negative value for a past instant and
+    // the `<= graceSeconds` check was always true → JWKS was served
+    // forever after id had been down for weeks. With the fix, the
+    // expired entry is rejected and the fetcher surfaces the
+    // jwks_unavailable error instead.
+    $cacheKey = 'cbox:jwks:'.hash('sha256', JWKS_URI);
+    Cache::put($cacheKey.':stale', [
+        'fetched_at' => now()->subSeconds(86400 + 60)->toIso8601String(),
+        'keys' => ['old-kid' => "-----BEGIN PUBLIC KEY-----\nplaceholder\n-----END PUBLIC KEY-----"],
+    ], 86400 + 3600);
+
+    // id is down so the live fetch can't refresh.
+    Http::fake([JWKS_URI => Http::response('id is dead', 503)]);
+
+    $fetcher = new JwksFetcher(
+        jwksUri: JWKS_URI,
+        http: app(HttpFactory::class),
+        cache: app(CacheFactory::class)->store(),
+        cacheTtlSeconds: 3600,
+        graceSeconds: 86400,
+    );
+
+    expect(fn () => $fetcher->publicKeyForKid('old-kid'))
+        ->toThrow(InvalidTokenException::class, 'Cannot fetch JWKS');
+});
+
+test('grace window ACCEPTS stale cached JWKS while inside the grace period', function (): void {
+    // Same shape as the regression test above but with a fetched_at
+    // INSIDE the grace window — the fetcher should serve the stale
+    // copy rather than fail. This makes sure the fix didn't tighten
+    // the window in the wrong direction.
+    $cacheKey = 'cbox:jwks:'.hash('sha256', JWKS_URI);
+    Cache::put($cacheKey.':stale', [
+        'fetched_at' => now()->subSeconds(3600)->toIso8601String(),
+        'keys' => ['old-kid' => "-----BEGIN PUBLIC KEY-----\nplaceholder\n-----END PUBLIC KEY-----"],
+    ], 86400 + 3600);
+
+    Http::fake([JWKS_URI => Http::response('id is dead', 503)]);
+
+    $fetcher = new JwksFetcher(
+        jwksUri: JWKS_URI,
+        http: app(HttpFactory::class),
+        cache: app(CacheFactory::class)->store(),
+        cacheTtlSeconds: 3600,
+        graceSeconds: 86400,
+    );
+
+    // Stale-but-inside-grace: the fetcher returns the placeholder PEM
+    // verbatim. We don't validate a token here (the placeholder is not
+    // a real key); we only assert that the lookup itself succeeds.
+    expect($fetcher->publicKeyForKid('old-kid'))->toContain('placeholder');
+});
+
+test('JwksFetcher silently drops RSA keys below 2048 bits and keeps strong keys', function (): void {
+    // Generate a 1024-bit key — explicitly weak.
+    $weak = openssl_pkey_new([
+        'private_key_bits' => 1024,
+        'private_key_type' => OPENSSL_KEYTYPE_RSA,
+    ]);
+    $weakDetails = openssl_pkey_get_details($weak);
+
+    [, , $strongKid, $strongRsa] = makeRsaKeypair('strong-kid');
+
+    fakeJwks([
+        rsaPublicToJwk($weakDetails['rsa'], 'weak-kid'),
+        rsaPublicToJwk($strongRsa, $strongKid),
+    ]);
+
+    $fetcher = new JwksFetcher(
+        jwksUri: JWKS_URI,
+        http: app(HttpFactory::class),
+        cache: app(CacheFactory::class)->store(),
+        cacheTtlSeconds: 3600,
+        graceSeconds: 86400,
+    );
+
+    // Strong key resolves; weak key is unknown — fetcher refuses to
+    // surface a sub-2048-bit modulus into the keyset under any
+    // circumstance, even though the JWKS doc shipped it.
+    expect($fetcher->publicKeyForKid('strong-kid'))->toBeString();
+    expect(fn () => $fetcher->publicKeyForKid('weak-kid'))
+        ->toThrow(InvalidTokenException::class, 'No JWKS key matches kid=weak-kid');
+});
+
+test('JwksFetcher throws when the JWKS contains ONLY weak RSA keys', function (): void {
+    $weak = openssl_pkey_new([
+        'private_key_bits' => 1024,
+        'private_key_type' => OPENSSL_KEYTYPE_RSA,
+    ]);
+    $weakDetails = openssl_pkey_get_details($weak);
+
+    fakeJwks([rsaPublicToJwk($weakDetails['rsa'], 'weak-kid')]);
+
+    $fetcher = new JwksFetcher(
+        jwksUri: JWKS_URI,
+        http: app(HttpFactory::class),
+        cache: app(CacheFactory::class)->store(),
+        cacheTtlSeconds: 3600,
+        graceSeconds: 86400,
+    );
+
+    expect(fn () => $fetcher->publicKeyForKid('weak-kid'))
+        ->toThrow(InvalidTokenException::class);
+});
+
 test('rejects tokens that are not Plain JWTs (e.g. malformed strings)', function (): void {
     [, , $kid, $rsa] = makeRsaKeypair();
     fakeJwks([rsaPublicToJwk($rsa, $kid)]);
