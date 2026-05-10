@@ -1,0 +1,65 @@
+{
+    "name": "cboxdk/cbox-id-jwks-auth",
+    "description": "JWKS-only validator + Laravel middleware for resource servers consuming Cbox id-issued tokens (cbox-infra/docs/SERVICE_AUTH.md)",
+    "keywords": [
+        "Cbox",
+        "oauth",
+        "jwks",
+        "jwt",
+        "validation",
+        "middleware",
+        "laravel"
+    ],
+    "homepage": "https://github.com/cboxdk/cbox-id-jwks-auth",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Sylvester Damgaard",
+            "email": "sn@cbox.dk",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.3|^8.4|^8.5",
+        "illuminate/contracts": "^11.0|^12.0|^13.0",
+        "illuminate/http": "^11.0|^12.0|^13.0",
+        "illuminate/support": "^11.0|^12.0|^13.0",
+        "lcobucci/jwt": "^5.0",
+        "nesbot/carbon": "^2.0|^3.0"
+    },
+    "require-dev": {
+        "laravel/pint": "^1.0",
+        "orchestra/testbench": "^9.0|^10.0|^11.0",
+        "pestphp/pest": "^3.0|^4.0",
+        "pestphp/pest-plugin-laravel": "^3.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Cbox\\CboxIdJwksAuth\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Cbox\\CboxIdJwksAuth\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "vendor/bin/pest",
+        "format": "vendor/bin/pint"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Cbox\\CboxIdJwksAuth\\CboxIdJwksAuthServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
