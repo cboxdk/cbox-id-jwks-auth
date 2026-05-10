@@ -72,7 +72,13 @@ class RequireOauthJwksValidation
             return null;
         }
 
-        return trim(substr($header, 7));
+        $token = trim(substr($header, 7));
+
+        // Edge case: header is literally "Bearer " (or "Bearer  ")
+        // with no token. Returning the empty string would end up in
+        // the validator and surface as reason=malformed; null here
+        // gets the more accurate reason=missing_token instead.
+        return $token === '' ? null : $token;
     }
 
     private function unauthorized(string $reason, string $description): JsonResponse
@@ -86,7 +92,22 @@ class RequireOauthJwksValidation
             401,
             // RFC 6750 Section 3 — the WWW-Authenticate challenge so
             // SDK clients can render a meaningful retry-or-reauth UX.
-            ['WWW-Authenticate' => "Bearer error=\"invalid_token\", error_description=\"{$description}\""],
+            // Sanitise: strip CR / LF / quote / backslash from the
+            // description so a crafted token can't break out of the
+            // quoted-string and inject a second header.
+            ['WWW-Authenticate' => 'Bearer error="invalid_token", error_description="'
+                .self::sanitiseHeaderValue($description).'"'],
         );
+    }
+
+    private static function sanitiseHeaderValue(string $value): string
+    {
+        // RFC 7230 §3.2.6 quoted-string: octets in 0x21–0x7E except
+        // " and \. We're more conservative — strip CTL chars too —
+        // and replace forbidden bytes with a single space rather
+        // than dropping silently so the message stays readable.
+        $sanitised = preg_replace('/[\x00-\x1F\x7F"\\\\]+/', ' ', $value);
+
+        return is_string($sanitised) ? $sanitised : '';
     }
 }
